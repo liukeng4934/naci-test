@@ -4,5 +4,6 @@
 # IDE / 系统文件
 .idea/
 *.iml
+*.log
 .DS_Store
 Thumbs.db
