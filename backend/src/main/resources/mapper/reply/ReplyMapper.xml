@@ -1,0 +1,178 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!-- namespace 对应 ReplyMapper 接口的全限定类名，SQL 的 id 与接口方法名对应。 -->
+<mapper namespace="com.naci.guestbook.mapper.ReplyMapper">
+
+    <!--
+        回复实体的基础结果映射：将 replies 表的下划线列名映射为 Reply 的 Java 属性。
+        parent_id 为空表示顶级回复，不为空表示对另一条回复的子回复。
+    -->
+    <resultMap id="replyResultMap" type="com.naci.guestbook.model.entity.Reply">
+        <id property="id" column="id"/>
+        <result property="messageId" column="message_id"/>
+        <result property="parentId" column="parent_id"/>
+        <result property="userId" column="user_id"/>
+        <result property="userName" column="user_name"/>
+        <result property="content" column="content"/>
+        <result property="likeCount" column="like_count"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <!--
+        在基础映射上扩展直接子回复数量。
+        extends 复用 replyResultMap 的全部字段，仅额外映射 child_reply_count。
+    -->
+    <resultMap id="replyWithChildCountResultMap"
+               type="com.naci.guestbook.model.entity.ReplyWithChildCount"
+               extends="replyResultMap">
+        <result property="childReplyCount" column="child_reply_count"/>
+    </resultMap>
+
+    <!-- 回复公共查询列，r 是 replies 表的别名；复用时可保证各查询返回字段一致。 -->
+    <sql id="replyColumns">
+        r.id,
+        r.message_id,
+        r.parent_id,
+        r.user_id,
+        r.user_name,
+        r.content,
+        r.like_count,
+        r.created_at,
+        r.updated_at
+    </sql>
+
+    <!--
+        查询留言主键，返回空表示留言不存在，可用于新增回复前的存在性校验。
+        已软删除的留言视为不存在，避免删除后的留言继续接收回复。
+    -->
+    <select id="selectMessageId" resultType="java.lang.Long">
+        SELECT id
+        FROM messages
+        WHERE id = #{messageId}
+          AND deleted_at IS NULL
+    </select>
+
+    <!--
+        查询未删除的留言并锁定对应行。FOR UPDATE 通常在事务中使用，
+        防止事务提交前其他事务同时修改或删除该留言。
+    -->
+    <select id="selectMessageIdForUpdate" resultType="java.lang.Long">
+        SELECT id
+        FROM messages
+        WHERE id = #{messageId}
+          AND deleted_at IS NULL
+        FOR UPDATE
+    </select>
+
+    <!-- 按回复主键查询单条回复，并映射为 Reply 实体。 -->
+    <select id="selectById" resultMap="replyResultMap">
+        SELECT
+        <include refid="replyColumns"/>
+        FROM replies r
+        WHERE r.id = #{replyId}
+    </select>
+
+    <!-- 按主键查询并锁定未删除的回复行，适用于事务内的修改、点赞或删除等并发控制场景。 -->
+    <select id="selectByIdForUpdate" resultMap="replyResultMap">
+        SELECT
+        <include refid="replyColumns"/>
+        FROM replies r
+        WHERE r.id = #{replyId}
+        FOR UPDATE
+    </select>
+
+    <!--
+        统计当前层级的直接回复数量，不包含更深层级的后代回复。
+        parentId 有值时统计该回复的子回复；parentId 为空时统计留言的顶级回复。
+        choose/when/otherwise 相当于 Java 的 if/else，只会执行一个分支。
+    -->
+    <select id="countDirectChildren" resultType="long">
+        SELECT COUNT(*)
+        FROM replies r
+        WHERE r.message_id = #{messageId}
+        <choose>
+            <when test="parentId != null">
+                AND r.parent_id = #{parentId}
+            </when>
+            <otherwise>
+                AND r.parent_id IS NULL
+            </otherwise>
+        </choose>
+    </select>
+
+    <!--
+        游标分页查询当前层级的直接回复，结果按创建时间和主键倒序排列。
+        标量子查询统计每条回复的直接子回复数，并映射到 childReplyCount。
+        游标生效时追加 (created_at, id) < 游标值 的行值比较，直接沿
+        idx_replies_message_parent_created_at 索引定位，代价与页深无关。
+    -->
+    <select id="selectDirectChildren" resultMap="replyWithChildCountResultMap">
+        SELECT
+        <include refid="replyColumns"/>,
+        (
+            SELECT COUNT(*)
+            FROM replies child
+            WHERE child.message_id = r.message_id
+              AND child.parent_id = r.id
+        ) AS child_reply_count
+        FROM replies r
+        WHERE r.message_id = #{messageId}
+        <choose>
+            <when test="parentId != null">
+                AND r.parent_id = #{parentId}
+            </when>
+            <otherwise>
+                AND r.parent_id IS NULL
+            </otherwise>
+        </choose>
+        <if test="cursorId != null">
+            AND (r.created_at, r.id) &lt; (#{cursorCreatedAt}, #{cursorId})
+        </if>
+        ORDER BY r.created_at DESC, r.id DESC
+        LIMIT #{limit}
+    </select>
+
+    <!--
+        新增顶级回复或子回复，并将数据库生成的自增 id 回填到实体。
+        parentId 允许为 null；显式指定 jdbcType=BIGINT 可帮助 MyBatis 正确处理空值。
+    -->
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO replies (
+            message_id,
+            parent_id,
+            user_id,
+            user_name,
+            content
+        ) VALUES (
+            #{messageId},
+            #{parentId,jdbcType=BIGINT},
+            #{userId},
+            #{userName},
+            #{content}
+        )
+    </insert>
+
+    <!-- 批量查询直接子回复 id，供逐层收集待删除子树。 -->
+    <select id="selectChildIdsByParentIds" resultType="java.lang.Long">
+        SELECT r.id
+        FROM replies r
+        WHERE r.message_id = #{messageId}
+          AND r.parent_id IN
+        <foreach collection="parentIds" item="parentId" open="(" separator="," close=")">
+            #{parentId}
+        </foreach>
+    </select>
+
+    <!-- 分批物理删除回复，按留言和 ID 限定范围，避免单条 SQL 的 IN 参数过多。 -->
+    <delete id="deleteByMessageIdAndIds">
+        DELETE FROM replies
+        WHERE message_id = #{messageId}
+          AND id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </delete>
+</mapper>

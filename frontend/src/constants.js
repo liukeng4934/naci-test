@@ -1,0 +1,11 @@
+export const MAX_MESSAGE_LENGTH = 500;
+export const MAX_REPLY_LENGTH = 300;
+export const MIN_USERNAME_LENGTH = 2;
+export const MAX_USERNAME_LENGTH = 20;
+export const MIN_PASSWORD_LENGTH = 6;
+export const MAX_PASSWORD_LENGTH = 64;
+export const AUTH_TOKEN_STORAGE_KEY = "echo-guestbook-auth-token";
+export const AUTH_EXPIRED_EVENT = "echo-guestbook-auth-expired";
+export const MESSAGE_PAGE_SIZE = 10;
+export const REPLY_PAGE_SIZE = 8;
+export const REPLY_ROOT_KEY = "__root__";

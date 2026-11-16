@@ -1,0 +1,8 @@
+# 工具生成的截图目录
+.screenshots/
+
+# IDE / 系统文件
+.idea/
+*.iml
+.DS_Store
+Thumbs.db

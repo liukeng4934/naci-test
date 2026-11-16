@@ -1,0 +1,221 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!-- namespace 对应 MessageMapper 接口的全限定类名，SQL 的 id 与接口方法名对应。 -->
+<mapper namespace="com.naci.guestbook.mapper.MessageMapper">
+
+    <!--
+        留言分页查询的公共筛选条件，供 countPage 和 selectPage 复用，确保总数与列表使用相同条件。
+        软删除的留言（deleted_at 非空）一律不参与列表和计数，用户删除后立即不可见。
+        query.q 非空时，同时匹配留言内容、留言用户名，以及该留言下任意回复的内容。
+        EXISTS 只判断是否存在符合条件的回复，避免 JOIN 回复表后产生重复留言。
+        #{} 使用预编译参数绑定，而不是直接拼接用户输入，可降低 SQL 注入风险。
+    -->
+    <sql id="pageWhere">
+        AND m.deleted_at IS NULL
+        <if test="query.q != null and query.q != ''">
+            AND (
+                m.content LIKE CONCAT('%', #{query.q}, '%')
+                OR m.user_name LIKE CONCAT('%', #{query.q}, '%')
+                OR EXISTS (
+                    SELECT 1
+                    FROM replies sr
+                    WHERE sr.message_id = m.id
+                      AND sr.content LIKE CONCAT('%', #{query.q}, '%')
+                )
+            )
+        </if>
+    </sql>
+
+    <!--
+        统计符合筛选条件的留言总数，用于计算分页页数。
+        where 标签在存在条件时自动生成 WHERE，并去掉片段开头的 AND；无条件时不生成 WHERE。
+    -->
+    <select id="countPage" resultType="long">
+        SELECT COUNT(*)
+        FROM messages m
+        <where>
+            <include refid="pageWhere"/>
+        </where>
+    </select>
+
+    <!--
+        分页查询留言列表，并返回 MessageVO 所需的展示字段。
+        reply_count：该留言下所有层级的回复总数。
+        direct_reply_count：parent_id 为空的顶级回复数量。
+        两个标量子查询分别统计，不会因关联回复表而重复留言行。
+    -->
+    <select id="selectPage" resultType="com.naci.guestbook.model.vo.MessageVO">
+        SELECT m.id,
+               m.user_id,
+               m.user_name,
+               m.content,
+               m.created_at,
+               (
+                   SELECT COUNT(*)
+                   FROM replies r
+                   WHERE r.message_id = m.id
+               ) AS reply_count,
+               (
+                   SELECT COUNT(*)
+                   FROM replies dr
+                   WHERE dr.message_id = m.id
+                     AND dr.parent_id IS NULL
+               ) AS direct_reply_count
+        FROM messages m
+        <where>
+            <include refid="pageWhere"/>
+        </where>
+        <!--
+            仅当 sort 为 createdAt_asc 时按时间正序，其余情况默认按时间倒序。
+            id 作为第二排序字段，保证创建时间相同时顺序仍然稳定。
+            排序字段由 XML 中的固定分支决定，不直接拼接用户输入。
+        -->
+        ORDER BY
+        <choose>
+            <when test="query.sort == 'createdAt_asc'">
+                m.created_at ASC, m.id ASC
+            </when>
+            <otherwise>
+                m.created_at DESC, m.id DESC
+            </otherwise>
+        </choose>
+        <!-- limit 为本页大小，offset 为跳过的记录数，通常等于（页码 - 1）× 页大小。 -->
+        LIMIT #{limit} OFFSET #{offset}
+    </select>
+
+    <!--
+        按主键查询留言展示对象 MessageVO。
+        返回留言展示字段，并通过标量子查询额外统计全部回复数和顶级回复数。
+    -->
+    <select id="selectVOById" resultType="com.naci.guestbook.model.vo.MessageVO">
+        SELECT m.id,
+               m.user_id,
+               m.user_name,
+               m.content,
+               m.created_at,
+               (
+                   SELECT COUNT(*)
+                   FROM replies r
+                   WHERE r.message_id = m.id
+               ) AS reply_count,
+               (
+                   SELECT COUNT(*)
+                   FROM replies dr
+                   WHERE dr.message_id = m.id
+                     AND dr.parent_id IS NULL
+               ) AS direct_reply_count
+        FROM messages m
+        WHERE m.id = #{id}
+          AND m.deleted_at IS NULL
+    </select>
+
+    <!--
+        查询未删除的留言并对该行加排他锁，通常在事务中配合后续更新或删除使用。
+        FOR UPDATE 会让其他尝试修改或锁定该行的事务等待，直至当前事务结束。
+        已软删除的留言查询不到，重复删除会按“留言不存在”处理。
+    -->
+    <select id="selectByIdForUpdate" resultType="com.naci.guestbook.model.entity.Message">
+        SELECT id, user_id, user_name, content, like_count, created_at, updated_at
+        FROM messages
+        WHERE id = #{id}
+          AND deleted_at IS NULL
+        FOR UPDATE
+    </select>
+
+    <!--
+        新增留言，只写入用户信息和正文，其余字段由数据库默认值或后续操作维护。
+        useGeneratedKeys 与 keyProperty 配合，将自增主键回填到 Message 对象的 id 属性。
+    -->
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO messages (user_id, user_name, content)
+        VALUES (#{userId}, #{userName}, #{content})
+    </insert>
+
+    <!-- 统计指定留言下所有层级的回复总数，不区分顶级回复和子回复。 -->
+    <select id="countRepliesByMessageId" resultType="long">
+        SELECT COUNT(*)
+        FROM replies
+        WHERE message_id = #{messageId}
+          AND deleted_at IS NULL
+    </select>
+
+    <!--
+        按留言 id 和发布者 user_id 软删除留言：只写入 deleted_at，不同步删除回复。
+        接口因此可以立即返回，回复的物理清理由后台任务异步完成。
+        限定 deleted_at IS NULL，重复请求不会覆盖首次删除时间，也返回 0 行。
+    -->
+    <update id="softDeleteByIdAndUserId">
+        UPDATE messages
+        SET deleted_at = UTC_TIMESTAMP(3)
+        WHERE id = #{id}
+          AND user_id = #{userId}
+          AND deleted_at IS NULL
+    </update>
+
+    <!-- 查询仍待物理清理的软删除留言 id，供后台任务按批处理。 -->
+    <select id="selectSoftDeletedIds" resultType="java.lang.Long">
+        SELECT id
+        FROM messages
+        WHERE deleted_at IS NOT NULL
+        ORDER BY deleted_at
+        LIMIT #{limit}
+    </select>
+
+    <!--
+        按 message_id 分批物理删除回复，走 idx_replies_message_created_at 索引定位。
+        LIMIT 控制单批行数，配合调用方每批一个独立事务，把大删除拆成小事务。
+    -->
+    <delete id="deleteRepliesByMessageId">
+        DELETE FROM replies
+        WHERE message_id = #{messageId}
+        LIMIT #{limit}
+    </delete>
+
+    <!--
+        物理删除单条已软删除留言。
+        正常流程下回复已被 deleteRepliesByMessageId 批删清空，
+        message_id 外键的 ON DELETE CASCADE 仅作为残留数据的兜底。
+        条件 deleted_at IS NOT NULL 保证不会误删未被软删除的留言。
+    -->
+    <delete id="deleteSoftDeletedById">
+        DELETE FROM messages
+        WHERE id = #{id}
+          AND deleted_at IS NOT NULL
+    </delete>
+
+    <!--
+        查询首页或统计接口所需的汇总数据：
+        message_count 为留言总数，reply_count 为回复总数，
+        today_count 为按 UTC 日期统计的当天新增留言数与新增回复数之和。
+        软删除的留言不计入统计，其下回复也因 JOIN 未删除留言而被一并排除。
+        两个派生表分别对 messages 和 replies 做一次条件聚合，避免重复扫描同一张表。
+        COUNT(CASE WHEN ...) 在空表时也返回 0；CROSS JOIN 两侧均只有一行，不会造成数据膨胀。
+    -->
+    <select id="selectSummary" resultType="com.naci.guestbook.model.vo.MessageSummaryVO">
+        SELECT
+            msg.message_count,
+            rep.reply_count,
+            msg.today_count + rep.today_count AS today_count
+        FROM (
+            SELECT
+                COUNT(*) AS message_count,
+                COUNT(
+                    CASE WHEN created_at >= UTC_DATE() THEN 1 END
+                ) AS today_count
+            FROM messages
+            WHERE deleted_at IS NULL
+        ) msg
+        CROSS JOIN (
+            SELECT
+                COUNT(*) AS reply_count,
+                COUNT(
+                    CASE WHEN r.created_at >= UTC_DATE() THEN 1 END
+                ) AS today_count
+            FROM replies r
+            JOIN messages m ON m.id = r.message_id
+            WHERE m.deleted_at IS NULL
+        ) rep
+    </select>
+</mapper>

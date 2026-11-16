@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!-- namespace 必须对应 UserMapper 接口的全限定类名，MyBatis 通过它将接口方法与 SQL 语句关联。 -->
+<mapper namespace="com.naci.guestbook.mapper.UserMapper">
+
+    <!--
+        用户查询结果映射：将数据库的下划线列名转换为 User 实体类的 Java 属性名。
+        id 用于标记主键；result 用于映射普通字段，例如 password_hash -> passwordHash。
+    -->
+    <resultMap id="UserResultMap" type="com.naci.guestbook.model.entity.User">
+        <id property="id" column="id"/>
+        <result property="username" column="username"/>
+        <result property="passwordHash" column="password_hash"/>
+        <result property="displayName" column="display_name"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <!-- 公共查询列片段：通过 include 复用，避免多个查询重复维护字段列表。 -->
+    <sql id="UserColumns">
+        id, username, password_hash, display_name, created_at, updated_at
+    </sql>
+
+    <!-- 按主键查询用户，并通过 UserResultMap 将结果转换为 User 对象。 -->
+    <select id="findById" resultMap="UserResultMap">
+        SELECT
+        <include refid="UserColumns"/>
+        FROM users
+        WHERE id = #{id}
+    </select>
+
+    <!--
+        按登录用户名查询用户，常用于登录校验或检查用户名是否已存在。
+        LIMIT 1 保证最多返回一条记录；#{username} 是预编译参数。
+    -->
+    <select id="findByUsername" resultMap="UserResultMap">
+        SELECT
+        <include refid="UserColumns"/>
+        FROM users
+        WHERE username = #{username}
+        LIMIT 1
+    </select>
+
+    <!--
+        新增用户。parameterType 指定传入 User 对象，#{} 中填写该对象的属性名。
+        useGeneratedKeys 获取数据库自增主键，keyProperty 将生成的主键回填到 User.id。
+    -->
+    <insert id="insert" parameterType="com.naci.guestbook.model.entity.User"
+            useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO users (username, password_hash, display_name)
+        VALUES (#{username}, #{passwordHash}, #{displayName})
+    </insert>
+</mapper>
